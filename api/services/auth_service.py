@@ -119,26 +119,44 @@ class AuthService:
         Telegram sends: id, first_name, last_name, username, photo_url, auth_date, hash
         We verify the hash using bot token.
         """
+        import logging
+        logger = logging.getLogger("api.auth")
+        
+        logger.info(f"[TG Auth] Validating auth data: {list(auth_data.keys())}")
+        
         if not TELEGRAM_BOT_TOKEN:
+            logger.error("[TG Auth] TELEGRAM_BOT_TOKEN not set!")
             return False
         
-        received_hash = auth_data.pop("hash", None)
+        # Make a copy to avoid mutating original
+        data = auth_data.copy()
+        received_hash = data.pop("hash", None)
         if not received_hash:
+            logger.error("[TG Auth] No hash in auth data")
             return False
         
         # Check auth_date is not too old (24 hours)
-        auth_date = auth_data.get("auth_date")
+        auth_date = data.get("auth_date")
         if auth_date:
             try:
                 auth_timestamp = int(auth_date)
-                if datetime.now(timezone.utc).timestamp() - auth_timestamp > 86400:
+                age = datetime.now(timezone.utc).timestamp() - auth_timestamp
+                logger.info(f"[TG Auth] auth_date age: {age:.0f}s")
+                if age > 86400:
+                    logger.error(f"[TG Auth] auth_date too old: {age:.0f}s > 86400s")
                     return False
             except ValueError:
+                logger.error("[TG Auth] Invalid auth_date format")
                 return False
         
+        # Filter out None values (Telegram doesn't send them)
+        data = {k: v for k, v in data.items() if v is not None}
+        
         # Create data check string
-        data_check_arr = [f"{k}={v}" for k, v in sorted(auth_data.items())]
+        data_check_arr = [f"{k}={v}" for k, v in sorted(data.items())]
         data_check_string = "\n".join(data_check_arr)
+        
+        logger.debug(f"[TG Auth] Data check string: {data_check_string}")
         
         # Calculate expected hash
         secret_key = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).digest()
@@ -148,10 +166,17 @@ class AuthService:
             hashlib.sha256
         ).hexdigest()
         
-        # Restore hash
-        auth_data["hash"] = received_hash
+        logger.info(f"[TG Auth] Expected hash: {expected_hash[:16]}...")
+        logger.info(f"[TG Auth] Received hash: {received_hash[:16]}...")
         
-        return hmac.compare_digest(expected_hash, received_hash)
+        match = hmac.compare_digest(expected_hash, received_hash)
+        if not match:
+            logger.error("[TG Auth] Hash mismatch!")
+        else:
+            logger.info("[TG Auth] Hash verified successfully!")
+        
+        return match
+
     
     @staticmethod
     async def get_or_create_account_by_telegram(
