@@ -32,6 +32,20 @@ def get_redis_client():
     return _redis_client
 
 
+# Async Redis client for FastAPI dependencies
+import redis.asyncio as aioredis
+
+_async_redis_client = None
+
+
+async def get_redis():
+    """Get async Redis client for FastAPI dependency injection."""
+    global _async_redis_client
+    if _async_redis_client is None:
+        _async_redis_client = await aioredis.from_url(REDIS_URL, decode_responses=True)
+    return _async_redis_client
+
+
 # Payment engine singleton
 _payment_engine = None
 
