@@ -27,8 +27,8 @@ class Account(Base):
     __tablename__ = "accounts"
     
     id: Mapped[UUID] = mapped_column(PG_UUID, primary_key=True, default=uuid4)
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
-    email: Mapped[Optional[str]] = mapped_column(Text)
+    telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, nullable=True)  # nullable for email-only users
+    email: Mapped[Optional[str]] = mapped_column(Text, unique=True, nullable=True)  # unique for email login
     balance_usd: Mapped[Decimal] = mapped_column(Numeric(18, 8), default=Decimal("0.00000000"))
     
     # B2B Features
