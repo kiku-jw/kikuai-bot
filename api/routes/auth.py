@@ -122,28 +122,27 @@ async def request_magic_link(
 ):
     """Request a magic link for email-based login.
     
-    If the email is registered, sends a magic link.
-    For security, always returns success even if email not found.
+    Creates a new account if email is not registered (enables email-only registration).
+    Sends a magic link to the email address.
     """
     from api.services.email_service import send_magic_link_email
     
-    account = await AuthService.get_account_by_email(db, request.email)
+    # Get or create account (enables email-only registration)
+    account = await AuthService.get_or_create_account_by_email(db, request.email)
     
-    if account:
-        token = await AuthService.set_magic_link_token(db, account)
-        magic_link = f"https://kikuai.dev/auth/verify?token={token}"
-        
-        # Send email via Brevo
-        email_sent = await send_magic_link_email(request.email, magic_link)
-        if email_sent:
-            logger.info(f"Magic link sent to {request.email}")
-        else:
-            logger.warning(f"Failed to send magic link to {request.email}, link: {magic_link}")
+    token = await AuthService.set_magic_link_token(db, account)
+    magic_link = f"https://kikuai.dev/auth/verify?token={token}"
     
-    # Always return success (don't reveal if email exists)
+    # Send email via Brevo
+    email_sent = await send_magic_link_email(request.email, magic_link)
+    if email_sent:
+        logger.info(f"Magic link sent to {request.email}")
+    else:
+        logger.warning(f"Failed to send magic link to {request.email}, link: {magic_link}")
+    
     return MagicLinkResponse(
         status="success",
-        message="If the email is registered, a magic link has been sent."
+        message="A magic link has been sent to your email."
     )
 
 

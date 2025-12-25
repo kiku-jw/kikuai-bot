@@ -213,6 +213,34 @@ class AuthService:
         return result.scalar_one_or_none()
     
     @staticmethod
+    async def get_or_create_account_by_email(db: AsyncSession, email: str) -> Account:
+        """Get existing account or create new one for email user.
+        
+        This enables email-based registration - no Telegram required.
+        """
+        from decimal import Decimal
+        
+        stmt = select(Account).where(Account.email == email)
+        result = await db.execute(stmt)
+        account = result.scalar_one_or_none()
+        
+        if account:
+            account.last_active_at = datetime.utcnow()
+            await db.commit()
+            return account
+        
+        # Create new account with email only (no telegram_id)
+        account = Account(
+            email=email,
+            balance_usd=Decimal("0.00"),
+        )
+        db.add(account)
+        await db.commit()
+        await db.refresh(account)
+        
+        return account
+    
+    @staticmethod
     async def get_account_by_id(db: AsyncSession, account_id: UUID) -> Optional[Account]:
         """Get account by ID."""
         stmt = select(Account).where(Account.id == account_id)
