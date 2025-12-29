@@ -54,9 +54,16 @@ FREE_TIER_LIMITS: dict[str, FreeTierLimits] = {
 }
 
 
+# Progressive limits configuration
+PROGRESSIVE_LIMIT_DAYS = 7  # First 7 days = reduced limits
+PROGRESSIVE_LIMIT_MULTIPLIER = 0.5  # 50% of normal limits
+
+
 class FreeTierService:
     """
     Service for tracking free tier usage with daily and monthly limits.
+    
+    Supports progressive limits: new users (first 7 days) get reduced limits.
     
     Usage:
         service = FreeTierService()
@@ -67,15 +74,54 @@ class FreeTierService:
     
     def __init__(self, redis: Optional[aioredis.Redis] = None):
         self._redis = redis
+        self._account_started_at: Optional[datetime] = None
+    
+    def set_account_started_at(self, started_at: Optional[datetime]) -> None:
+        """Set account start date for progressive limits calculation."""
+        self._account_started_at = started_at
     
     async def _get_redis(self) -> aioredis.Redis:
         if self._redis:
             return self._redis
         return await get_free_tier_redis()
     
+    def _is_in_progressive_period(self) -> bool:
+        """Check if account is within progressive (reduced) limits period."""
+        if not self._account_started_at:
+            return False
+        
+        days_since_start = (datetime.utcnow() - self._account_started_at).days
+        return days_since_start < PROGRESSIVE_LIMIT_DAYS
+    
     def _get_limits(self, product_id: str) -> FreeTierLimits:
-        """Get limits for a product, with fallback defaults."""
-        return FREE_TIER_LIMITS.get(product_id, FreeTierLimits(daily=10, monthly=100))
+        """Get limits for a product, applying progressive reduction if applicable."""
+        base_limits = FREE_TIER_LIMITS.get(product_id, FreeTierLimits(daily=10, monthly=100))
+        
+        if self._is_in_progressive_period():
+            # Apply 50% reduction for new users, minimum 1
+            return FreeTierLimits(
+                daily=max(1, int(base_limits.daily * PROGRESSIVE_LIMIT_MULTIPLIER)),
+                monthly=max(1, int(base_limits.monthly * PROGRESSIVE_LIMIT_MULTIPLIER))
+            )
+        
+        return base_limits
+    
+    def get_progressive_status(self) -> dict:
+        """Get progressive limits status for display."""
+        if not self._account_started_at:
+            return {"is_progressive": False, "days_remaining": 0, "multiplier": 1.0}
+        
+        days_since_start = (datetime.utcnow() - self._account_started_at).days
+        
+        if days_since_start >= PROGRESSIVE_LIMIT_DAYS:
+            return {"is_progressive": False, "days_remaining": 0, "multiplier": 1.0}
+        
+        return {
+            "is_progressive": True,
+            "days_remaining": PROGRESSIVE_LIMIT_DAYS - days_since_start,
+            "multiplier": PROGRESSIVE_LIMIT_MULTIPLIER,
+            "full_access_in_days": PROGRESSIVE_LIMIT_DAYS - days_since_start
+        }
     
     def _daily_key(self, product_id: str, identifier: str) -> str:
         """Redis key for daily counter."""
