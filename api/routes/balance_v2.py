@@ -81,3 +81,29 @@ async def get_history(
         )
         for tx in transactions
     ]
+
+
+@router.get("/usage/summary")
+async def get_usage_summary(
+    account: Account = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get simplified usage summary for dashboard.
+    Returns: {chart2csv: 123, patas: 45, masker: 78, reliapi: 12}
+    """
+    tracker = UsageTracker(db)
+    stats = await tracker.get_usage_stats(account.telegram_id)
+    
+    # Convert list of usage stats to simple dict
+    result = {}
+    for item in stats.get("usage", []):
+        result[item["product_id"]] = item["units"]
+    
+    # Ensure all products are present (with 0 if no usage)
+    for product_id in ["chart2csv", "patas", "masker", "reliapi"]:
+        if product_id not in result:
+            result[product_id] = 0
+    
+    return result
+
