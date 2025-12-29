@@ -1,16 +1,17 @@
-"""Masker PII redaction proxy endpoint with billing integration."""
+"""Masker PII redaction proxy endpoint with billing integration and Credits system."""
 
 import httpx
 import secrets
-from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Header, Depends, status
+from fastapi import APIRouter, HTTPException, Header, Depends, status, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.usage_tracker_v2 import UsageTracker
+from api.services.free_tier_service import FreeTierService
+from api.services.credits_service import usd_to_credits, PRODUCT_CREDITS
 from api.db.base import get_db
 from api.dependencies import get_redis
 
@@ -19,9 +20,8 @@ router = APIRouter(prefix="/api/v1/masker", tags=["masker"])
 # Masker API URL (separate service)
 MASKER_API = "https://masker.kikuai.dev"
 
-# Pricing - $0.001 per request (1000 requests = $1)
-CREDITS_PER_REQUEST = Decimal("0.001")
-FREE_DAILY_LIMIT = 3
+# Pricing in USD (matches products table)
+COST_PER_REQUEST = Decimal("0.001")  # 1 credit
 
 
 class RedactRequest(BaseModel):
@@ -34,27 +34,10 @@ class RedactRequest(BaseModel):
     entities: list[str] | None = Field(default=None, description="Entity types to redact")
 
 
-async def check_free_tier(ip: str, redis) -> tuple[bool, int]:
-    """
-    Check if IP has free tier quota remaining.
-
-    Returns: (allowed: bool, remaining: int)
-    """
-    key = f"free:masker:{ip}:{date.today().isoformat()}"
-
-    count = await redis.incr(key)
-    if count == 1:
-        await redis.expire(key, 86400)  # 24 hours
-
-    remaining = max(0, FREE_DAILY_LIMIT - count)
-    allowed = count <= FREE_DAILY_LIMIT
-
-    return allowed, remaining
-
-
 @router.post("/redact")
 async def redact_pii(
     request: RedactRequest,
+    response: Response,
     x_api_key: str | None = Header(None, alias="X-API-Key"),
     x_forwarded_for: str | None = Header(None, alias="X-Forwarded-For"),
     cf_connecting_ip: str | None = Header(None, alias="CF-Connecting-IP"),
@@ -65,8 +48,12 @@ async def redact_pii(
     Redact PII from text or JSON.
 
     **Authentication:**
-    - Without API key: 3 free requests per day per IP
-    - With API key: Uses credit balance ($0.001 per request)
+    - Without API key: 100 free requests per day (2,000/month) per IP
+    - With API key: Uses credit balance (1 credit per request)
+
+    **Headers returned:**
+    - X-Credits-Used: Credits consumed by this request
+    - X-Credits-Balance: Remaining balance after request
 
     **Responses:**
     - 200: Redaction successful
@@ -90,30 +77,40 @@ async def redact_pii(
         except Exception:
             pass
 
+    free_tier_service = FreeTierService(redis)
+
     if account:
         # Authenticated: Check credits
-        if account.balance_usd < CREDITS_PER_REQUEST:
+        credits_required = PRODUCT_CREDITS["masker"]
+        
+        if account.balance_usd < COST_PER_REQUEST:
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail={
                     "code": "INSUFFICIENT_CREDITS",
-                    "message": f"Insufficient credits. Required: ${CREDITS_PER_REQUEST}, Available: ${account.balance_usd}",
-                    "balance": float(account.balance_usd),
-                    "required": float(CREDITS_PER_REQUEST),
+                    "message": f"Insufficient credits. Required: {credits_required} credit, Available: {usd_to_credits(account.balance_usd)} credits",
+                    "balance_credits": usd_to_credits(account.balance_usd),
+                    "required_credits": credits_required,
+                    "topup_url": "https://kikuai.dev/pricing",
                 },
             )
     else:
         # Anonymous: Check free tier
-        allowed, remaining = await check_free_tier(client_ip, redis)
+        free_tier_result = await free_tier_service.check_limit("masker", client_ip)
 
-        if not allowed:
+        if not free_tier_result.allowed:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={
                     "code": "FREE_LIMIT_EXCEEDED",
-                    "message": "Free tier limit exceeded. Sign in to continue.",
-                    "limit": FREE_DAILY_LIMIT,
-                    "resets_at": f"{date.today().isoformat()}T00:00:00Z",
+                    "message": "Free tier limit exceeded. Sign in to continue or purchase credits.",
+                    "remaining_today": free_tier_result.remaining_daily,
+                    "remaining_month": free_tier_result.remaining_monthly,
+                    "limit_daily": free_tier_result.limit_daily,
+                    "limit_monthly": free_tier_result.limit_monthly,
+                    "resets_at": free_tier_result.resets_at_daily,
+                    "signup_url": "https://kikuai.dev/auth/login",
+                    "pricing_url": "https://kikuai.dev/pricing",
                 },
             )
 
@@ -132,22 +129,22 @@ async def redact_pii(
             if request.entities:
                 body["entities"] = request.entities
 
-            response = await client.post(
+            api_response = await client.post(
                 f"{MASKER_API}/api/v1/mask",
                 json=body,
             )
 
-            if response.status_code != 200:
+            if api_response.status_code != 200:
                 raise HTTPException(
-                    status_code=response.status_code,
+                    status_code=api_response.status_code,
                     detail=(
-                        response.json()
-                        if response.headers.get("content-type", "").startswith("application/json")
-                        else response.text
+                        api_response.json()
+                        if api_response.headers.get("content-type", "").startswith("application/json")
+                        else api_response.text
                     ),
                 )
 
-            result = response.json()
+            result = api_response.json()
 
     except httpx.RequestError as e:
         raise HTTPException(
@@ -160,7 +157,7 @@ async def redact_pii(
         tracker = UsageTracker(db)
         idempotency_key = f"masker_{account.id}_{secrets.token_hex(8)}"
 
-        await tracker.track_usage(
+        new_balance = await tracker.track_usage(
             telegram_id=account.telegram_id,
             product_id="masker",
             idempotency_key=idempotency_key,
@@ -168,21 +165,24 @@ async def redact_pii(
             metadata={
                 "endpoint": "redact",
                 "mode": request.mode,
-                "cost_usd": float(CREDITS_PER_REQUEST),
             },
         )
 
-        # Add billing info to response
+        # Set billing headers
+        credits_used = PRODUCT_CREDITS["masker"]
+        credits_remaining = usd_to_credits(new_balance)
+        response.headers["X-Credits-Used"] = str(credits_used)
+        response.headers["X-Credits-Balance"] = str(credits_remaining)
+
         result["billing"] = {
-            "credits_used": float(CREDITS_PER_REQUEST),
-            "balance_remaining": float(account.balance_usd - CREDITS_PER_REQUEST),
+            "credits_used": credits_used,
+            "credits_remaining": credits_remaining,
         }
     else:
-        # Add free tier info
-        _, remaining = await check_free_tier(client_ip, redis)
-        result["free_tier"] = {
-            "remaining_today": remaining,
-            "limit": FREE_DAILY_LIMIT,
-        }
+        # Record free tier usage
+        await free_tier_service.record_usage("masker", client_ip)
+        
+        remaining = await free_tier_service.get_remaining("masker", client_ip)
+        result["free_tier"] = remaining
 
     return result

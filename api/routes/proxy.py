@@ -53,6 +53,9 @@ async def proxy_llm(
     db: AsyncSession = Depends(get_db)
 ):
     """Proxy LLM request to ReliAPI with atomic charging."""
+    from fastapi import Response
+    from api.services.credits_service import usd_to_credits
+    
     tracker = UsageTracker(db)
     
     # Use request's idempotency key or generate one
@@ -71,7 +74,7 @@ async def proxy_llm(
         actual_cost_usd = Decimal(str(result.get("meta", {}).get("cost_usd", "0.001")))
         
         # 3. ATOMIC CHARGE & RECORD in Ledger
-        await tracker.track_usage(
+        new_balance = await tracker.track_usage(
             telegram_id=account.telegram_id,
             product_id="reliapi",
             idempotency_key=idempotency_key,
@@ -83,6 +86,12 @@ async def proxy_llm(
                 "actual_cost": float(actual_cost_usd)
             }
         )
+        
+        # Add billing info
+        result["billing"] = {
+            "credits_used": 0.1,  # Base 0.1 credit per request
+            "credits_remaining": usd_to_credits(new_balance),
+        }
         
         return result
     

@@ -40,6 +40,13 @@ class Account(Base):
     email_auth_token: Mapped[Optional[str]] = mapped_column(Text, unique=True)
     email_auth_expires: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     
+    # Email Verification (required for free tier)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    email_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    
+    # Free Tier Tracking
+    free_tier_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     

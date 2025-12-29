@@ -13,7 +13,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from api.routes import api_keys_v2 as api_keys, proxy, balance_v2 as balance, payment, webhooks, webapp, auth, chart2csv, masker, admin_stats
+from api.routes import api_keys_v2 as api_keys, proxy, balance_v2 as balance, payment, webhooks, webapp, auth, chart2csv, masker, patas, pricing, admin_stats
 from api.dependencies import get_payment_engine
 from api.db.base import AsyncSessionLocal, DebugLog
 from api.context import request_id_var, ip_address_var, user_agent_var, account_id_var, opt_in_debug_var
@@ -239,6 +239,8 @@ app.include_router(webapp.router)
 app.include_router(auth.router)
 app.include_router(chart2csv.router)
 app.include_router(masker.router)
+app.include_router(patas.router)
+app.include_router(pricing.router)
 app.include_router(admin_stats.router)
 
 # Additional webhook mount to support /api/webhooks/paddle (without /v1)

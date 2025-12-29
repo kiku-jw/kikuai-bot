@@ -1,100 +1,142 @@
-"""Balance and usage endpoints."""
+"""Balance and usage endpoints with Credits display."""
 
+from decimal import Decimal
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel
-import json
-import redis
+from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
-from api.middleware.auth import verify_api_key, get_user
-from config.settings import REDIS_URL
+from api.db.base import get_db, Account
+from api.services.account_service import AccountService
+from api.services.credits_service import usd_to_credits, format_credits
+from api.services.free_tier_service import FreeTierService
+from api.services.usage_tracker_v2 import UsageTracker
+from api.dependencies import get_redis
 
 router = APIRouter(prefix="/api/v1", tags=["balance"])
-redis_client = redis.from_url(REDIS_URL)
 
 
 class BalanceResponse(BaseModel):
-    """Balance response model."""
+    """Balance response model with Credits."""
     balance_usd: float
+    balance_credits: int
     currency: str = "USD"
+    free_tier: Optional[dict] = None
 
 
 class UsageResponse(BaseModel):
     """Usage response model."""
-    month: str
-    requests: int
-    cost_usd: float
-    endpoint_usage: dict = {}
+    period: str
+    balance_usd: float
+    balance_credits: int
+    usage: list
 
 
-def get_usage_from_redis(user_id: int, month: str = None) -> dict:
-    """Get usage statistics from Redis."""
-    if not month:
-        month = datetime.now().strftime("%Y-%m")
-    
-    usage_key = f"usage:{user_id}:{month}"
-    cost_key = f"cost:{user_id}:{month}"
-    
-    requests = int(redis_client.get(usage_key) or 0)
-    cost = float(redis_client.get(cost_key) or 0)
-    
-    # Get endpoint usage
-    pattern = f"usage:{user_id}:{month}:*"
-    endpoint_keys = redis_client.keys(pattern)
-    
-    endpoint_usage = {}
-    for key in endpoint_keys:
-        endpoint = key.decode().split(":")[-1]
-        count = int(redis_client.get(key) or 0)
-        endpoint_usage[endpoint] = count
-    
-    return {
-        "month": month,
-        "requests": requests,
-        "cost_usd": cost,
-        "endpoint_usage": endpoint_usage,
-    }
+class HistoryItem(BaseModel):
+    """Transaction history item."""
+    id: str
+    type: str
+    amount_usd: float
+    amount_credits: int
+    description: Optional[str]
+    created_at: str
 
 
 @router.get("/balance", response_model=BalanceResponse)
-async def get_balance(x_api_key: str = Header(..., alias="X-API-Key")):
-    """Get current balance."""
-    user_id = await verify_api_key(x_api_key)
-    user = await get_user(user_id)
+async def get_balance(
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    db: AsyncSession = Depends(get_db),
+    redis = Depends(get_redis),
+):
+    """
+    Get current balance in USD and Credits.
     
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    Also returns free tier usage for anonymous/unauthenticated context.
+    """
+    account_service = AccountService(db)
     
-    balance = user.get("balance_usd", 0.0)
+    try:
+        account, _ = await account_service.verify_key(x_api_key)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid API key")
     
-    return BalanceResponse(balance_usd=balance)
+    balance_usd = float(account.balance_usd)
+    balance_credits = usd_to_credits(account.balance_usd)
+    
+    # Get free tier status
+    free_tier_service = FreeTierService(redis)
+    identifier = str(account.id)
+    free_tier = await free_tier_service.get_all_remaining(identifier)
+    
+    return BalanceResponse(
+        balance_usd=balance_usd,
+        balance_credits=balance_credits,
+        free_tier=free_tier,
+    )
 
 
 @router.get("/usage", response_model=UsageResponse)
 async def get_usage(
     month: Optional[str] = None,
     x_api_key: str = Header(..., alias="X-API-Key"),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Get usage statistics."""
-    user_id = await verify_api_key(x_api_key)
-    usage = get_usage_from_redis(user_id, month)
+    """Get usage statistics for current or specified month."""
+    account_service = AccountService(db)
     
-    return UsageResponse(**usage)
+    try:
+        account, _ = await account_service.verify_key(x_api_key)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    tracker = UsageTracker(db)
+    stats = await tracker.get_usage_stats(account.telegram_id, month)
+    
+    # Add credits info
+    balance_usd = float(stats.get("balance_usd", 0))
+    
+    return UsageResponse(
+        period=stats.get("period", "current_month"),
+        balance_usd=balance_usd,
+        balance_credits=usd_to_credits(Decimal(str(balance_usd))),
+        usage=stats.get("usage", []),
+    )
 
 
 @router.get("/history")
 async def get_history(
-    limit: int = 10,
+    limit: int = 20,
     x_api_key: str = Header(..., alias="X-API-Key"),
+    db: AsyncSession = Depends(get_db),
 ):
     """Get transaction history."""
-    user_id = await verify_api_key(x_api_key)
+    from sqlalchemy import select
+    from api.db.base import Transaction
     
-    # TODO: Implement transaction history
-    # For now, return empty list
-    return {
-        "transactions": [],
-        "total": 0,
-    }
-
+    account_service = AccountService(db)
+    
+    try:
+        account, _ = await account_service.verify_key(x_api_key)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Get transactions
+    stmt = select(Transaction).where(
+        Transaction.account_id == account.id
+    ).order_by(Transaction.created_at.desc()).limit(limit)
+    
+    result = await db.execute(stmt)
+    transactions = result.scalars().all()
+    
+    return [
+        {
+            "id": str(tx.id),
+            "type": tx.type,
+            "amount_usd": float(tx.amount_usd),
+            "amount_credits": usd_to_credits(tx.amount_usd),
+            "description": tx.description,
+            "created_at": tx.created_at.isoformat(),
+        }
+        for tx in transactions
+    ]

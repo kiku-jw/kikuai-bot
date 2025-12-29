@@ -30,3 +30,11 @@ SERVER_SECRET = os.getenv("SERVER_SECRET", "kiku-dev-secret-change-me-in-prod")
 
 # Email (Brevo)
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
+
+# Credits System
+CREDITS_PER_USD = 1000  # 1000 credits = $1 USD
+CREDITS_DISPLAY_NAME = "credits"
+
+# Free Tier Settings
+FREE_TIER_REQUIRES_EMAIL_VERIFICATION = True
+FREE_TIER_PROGRESSIVE_DAYS = 7  # First week = 50% limits

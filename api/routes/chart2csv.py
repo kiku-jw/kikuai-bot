@@ -1,16 +1,17 @@
-"""Chart2CSV proxy endpoint with billing integration."""
+"""Chart2CSV proxy endpoint with billing integration and Credits system."""
 
 import httpx
 import secrets
-from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Header, Depends, status
+from fastapi import APIRouter, HTTPException, UploadFile, File, Header, Depends, status, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.services.usage_tracker_v2 import UsageTracker
-from api.db.base import get_db, Account
+from api.services.free_tier_service import FreeTierService
+from api.services.credits_service import usd_to_credits, format_credits, PRODUCT_CREDITS
+from api.db.base import get_db
 from api.dependencies import get_redis
 
 router = APIRouter(prefix="/api/v1/chart2csv", tags=["chart2csv"])
@@ -18,31 +19,13 @@ router = APIRouter(prefix="/api/v1/chart2csv", tags=["chart2csv"])
 # Chart2CSV API URL - use public endpoint (runs as separate service)
 CHART2CSV_API = "https://chart2csv.kikuai.dev"
 
-# Pricing - MUST MATCH products table in DB (see 001_initial_schema.sql)
-CREDITS_PER_EXTRACTION = Decimal("0.05")  # $0.05 per image extraction
-FREE_DAILY_LIMIT = 3
-
-
-async def check_free_tier(ip: str, redis) -> tuple[bool, int]:
-    """
-    Check if IP has free tier quota remaining.
-    
-    Returns: (allowed: bool, remaining: int)
-    """
-    key = f"free:chart2csv:{ip}:{date.today().isoformat()}"
-    
-    count = await redis.incr(key)
-    if count == 1:
-        await redis.expire(key, 86400)  # 24 hours
-    
-    remaining = max(0, FREE_DAILY_LIMIT - count)
-    allowed = count <= FREE_DAILY_LIMIT
-    
-    return allowed, remaining
+# Pricing in USD (matches products table)
+COST_PER_EXTRACTION = Decimal("0.05")  # 50 credits
 
 
 @router.post("/extract")
 async def extract_chart(
+    response: Response,
     file: UploadFile = File(...),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_forwarded_for: Optional[str] = Header(None, alias="X-Forwarded-For"),
@@ -54,8 +37,12 @@ async def extract_chart(
     Extract data from a chart image.
     
     **Authentication:**
-    - Without API key: 3 free extractions per day per IP
-    - With API key: Uses credit balance ($0.05 per extraction)
+    - Without API key: 3 free extractions per day (50/month) per IP
+    - With API key: Uses credit balance (50 credits per extraction)
+    
+    **Headers returned:**
+    - X-Credits-Used: Credits consumed by this request
+    - X-Credits-Balance: Remaining balance after request
     
     **Responses:**
     - 200: Extraction successful
@@ -77,33 +64,40 @@ async def extract_chart(
             # Invalid key, treat as anonymous
             pass
     
+    free_tier_service = FreeTierService(redis)
+    
     if account:
         # Authenticated: Check credits
-        tracker = UsageTracker(db)
+        credits_required = PRODUCT_CREDITS["chart2csv"]
         
-        # Check balance before processing
-        if account.balance_usd < CREDITS_PER_EXTRACTION:
+        if account.balance_usd < COST_PER_EXTRACTION:
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 detail={
                     "code": "INSUFFICIENT_CREDITS",
-                    "message": f"Insufficient credits. Required: ${CREDITS_PER_EXTRACTION}, Available: ${account.balance_usd}",
-                    "balance": float(account.balance_usd),
-                    "required": float(CREDITS_PER_EXTRACTION),
+                    "message": f"Insufficient credits. Required: {credits_required} credits, Available: {usd_to_credits(account.balance_usd)} credits",
+                    "balance_credits": usd_to_credits(account.balance_usd),
+                    "required_credits": credits_required,
+                    "topup_url": "https://kikuai.dev/pricing",
                 }
             )
     else:
-        # Anonymous: Check free tier
-        allowed, remaining = await check_free_tier(client_ip, redis)
+        # Anonymous: Check free tier with daily + monthly limits
+        free_tier_result = await free_tier_service.check_limit("chart2csv", client_ip)
         
-        if not allowed:
+        if not free_tier_result.allowed:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={
                     "code": "FREE_LIMIT_EXCEEDED",
-                    "message": f"Free tier limit exceeded. Sign in to continue.",
-                    "limit": FREE_DAILY_LIMIT,
-                    "resets_at": f"{date.today().isoformat()}T00:00:00Z",
+                    "message": "Free tier limit exceeded. Sign in to continue or purchase credits.",
+                    "remaining_today": free_tier_result.remaining_daily,
+                    "remaining_month": free_tier_result.remaining_monthly,
+                    "limit_daily": free_tier_result.limit_daily,
+                    "limit_monthly": free_tier_result.limit_monthly,
+                    "resets_at": free_tier_result.resets_at_daily,
+                    "signup_url": "https://kikuai.dev/auth/login",
+                    "pricing_url": "https://kikuai.dev/pricing",
                 }
             )
     
@@ -114,18 +108,18 @@ async def extract_chart(
             file_content = await file.read()
             
             # Forward request
-            response = await client.post(
+            api_response = await client.post(
                 f"{CHART2CSV_API}/v1/extract",
                 files={"file": (file.filename, file_content, file.content_type)},
             )
             
-            if response.status_code != 200:
+            if api_response.status_code != 200:
                 raise HTTPException(
-                    status_code=response.status_code,
-                    detail=response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text
+                    status_code=api_response.status_code,
+                    detail=api_response.json() if api_response.headers.get("content-type", "").startswith("application/json") else api_response.text
                 )
             
-            result = response.json()
+            result = api_response.json()
             
     except httpx.RequestError as e:
         raise HTTPException(
@@ -133,11 +127,12 @@ async def extract_chart(
             detail={"code": "SERVICE_UNAVAILABLE", "message": f"Chart2CSV service unavailable: {str(e)}"}
         )
     
-    # Deduct credits on success (only for authenticated users)
+    # Deduct credits / record usage on success
     if account and result.get("success"):
+        tracker = UsageTracker(db)
         idempotency_key = f"chart2csv_{account.id}_{secrets.token_hex(8)}"
         
-        await tracker.track_usage(
+        new_balance = await tracker.track_usage(
             telegram_id=account.telegram_id,
             product_id="chart2csv",
             idempotency_key=idempotency_key,
@@ -145,21 +140,26 @@ async def extract_chart(
             metadata={
                 "endpoint": "extract",
                 "chart_type": result.get("chart_type"),
-                "cost_usd": float(CREDITS_PER_EXTRACTION),
             }
         )
         
+        # Set billing headers
+        credits_used = PRODUCT_CREDITS["chart2csv"]
+        credits_remaining = usd_to_credits(new_balance)
+        response.headers["X-Credits-Used"] = str(credits_used)
+        response.headers["X-Credits-Balance"] = str(credits_remaining)
+        
         # Add billing info to response
         result["billing"] = {
-            "credits_used": float(CREDITS_PER_EXTRACTION),
-            "balance_remaining": float(account.balance_usd - CREDITS_PER_EXTRACTION),
+            "credits_used": credits_used,
+            "credits_remaining": credits_remaining,
         }
     elif not account:
-        # Add free tier info
-        _, remaining = await check_free_tier(client_ip, redis)
-        result["free_tier"] = {
-            "remaining_today": remaining,
-            "limit": FREE_DAILY_LIMIT,
-        }
+        # Record free tier usage
+        await free_tier_service.record_usage("chart2csv", client_ip)
+        
+        # Get updated remaining
+        remaining = await free_tier_service.get_remaining("chart2csv", client_ip)
+        result["free_tier"] = remaining
     
     return result
