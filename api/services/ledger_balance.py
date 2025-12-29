@@ -1,4 +1,5 @@
 import json
+import redis
 from decimal import Decimal, ROUND_HALF_EVEN, getcontext
 from datetime import datetime
 from typing import Optional, List
@@ -9,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from api.db.base import Account, Transaction, UsageLog, APIKey, Product
-from api.services.balance_manager import redis_client
+from config.settings import REDIS_URL
+
+# Redis client for balance caching
+redis_client = redis.from_url(REDIS_URL)
 
 # Set precision context globally for financial calculations
 getcontext().prec = 28 # Sufficient for (18, 8) math
