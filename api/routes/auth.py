@@ -309,3 +309,179 @@ async def login_with_google(
     _store_refresh_token(refresh_hash, account.id)
 
     return token_pair
+
+
+# ============================================
+# Google OAuth Redirect Flow (ad-blocker safe)
+# ============================================
+
+import urllib.parse
+import secrets
+import httpx
+from fastapi.responses import RedirectResponse
+from config.settings import GOOGLE_CLIENT_SECRET, FRONTEND_URL
+
+# Store state tokens temporarily
+_oauth_states: dict = {}
+
+
+@router.get("/google/init")
+async def google_oauth_init():
+    """Redirect to Google OAuth consent screen.
+    
+    This endpoint initiates the OAuth flow by redirecting the user
+    to Google's authorization page. This works even with ad-blockers.
+    """
+    from config.settings import GOOGLE_CLIENT_ID
+    
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Google OAuth not configured")
+    
+    # Generate state for CSRF protection
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = datetime.utcnow()
+    
+    # Clean old states (older than 10 minutes)
+    cutoff = datetime.utcnow() - timedelta(minutes=10)
+    _oauth_states.clear()
+    _oauth_states[state] = datetime.utcnow()
+    
+    # Build Google OAuth URL
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": f"https://api.kikuai.dev/api/v1/auth/google/callback",
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+    
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
+@router.get("/google/callback")
+async def google_oauth_callback(
+    code: str = None,
+    state: str = None,
+    error: str = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Handle Google OAuth callback.
+    
+    Exchanges authorization code for tokens and creates/updates user account.
+    Redirects to frontend with JWT tokens.
+    """
+    from config.settings import GOOGLE_CLIENT_ID
+    
+    # Check for errors
+    if error:
+        logger.error(f"Google OAuth error: {error}")
+        return RedirectResponse(
+            url=f"{FRONTEND_URL}/auth/login?error=google_denied",
+            status_code=302
+        )
+    
+    if not code or not state:
+        return RedirectResponse(
+            url=f"{FRONTEND_URL}/auth/login?error=invalid_request",
+            status_code=302
+        )
+    
+    # Verify state (CSRF protection)
+    if state not in _oauth_states:
+        logger.warning(f"Invalid OAuth state: {state}")
+        return RedirectResponse(
+            url=f"{FRONTEND_URL}/auth/login?error=invalid_state",
+            status_code=302
+        )
+    del _oauth_states[state]
+    
+    # Exchange code for tokens
+    try:
+        async with httpx.AsyncClient() as client:
+            token_response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": f"https://api.kikuai.dev/api/v1/auth/google/callback",
+                    "grant_type": "authorization_code",
+                }
+            )
+            
+            if token_response.status_code != 200:
+                logger.error(f"Google token exchange failed: {token_response.text}")
+                return RedirectResponse(
+                    url=f"{FRONTEND_URL}/auth/login?error=token_exchange_failed",
+                    status_code=302
+                )
+            
+            tokens = token_response.json()
+            id_token_str = tokens.get("id_token")
+            
+            if not id_token_str:
+                return RedirectResponse(
+                    url=f"{FRONTEND_URL}/auth/login?error=no_id_token",
+                    status_code=302
+                )
+    except Exception as e:
+        logger.error(f"Google token exchange error: {e}")
+        return RedirectResponse(
+            url=f"{FRONTEND_URL}/auth/login?error=network_error",
+            status_code=302
+        )
+    
+    # Verify and decode the ID token
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+        
+        idinfo = id_token.verify_oauth2_token(
+            id_token_str,
+            google_requests.Request(),
+            GOOGLE_CLIENT_ID
+        )
+        
+        google_id = idinfo['sub']
+        email = idinfo.get('email')
+        name = idinfo.get('name')
+        
+        if not email:
+            return RedirectResponse(
+                url=f"{FRONTEND_URL}/auth/login?error=no_email",
+                status_code=302
+            )
+    except ValueError as e:
+        logger.error(f"Google token verification failed: {e}")
+        return RedirectResponse(
+            url=f"{FRONTEND_URL}/auth/login?error=invalid_token",
+            status_code=302
+        )
+    
+    # Get or create account
+    account = await AuthService.get_or_create_account_by_google(
+        db,
+        google_id=google_id,
+        email=email,
+        name=name,
+    )
+    
+    # Create token pair
+    token_pair, refresh_hash = AuthService.create_token_pair(account)
+    
+    # Store refresh token in Redis
+    _store_refresh_token(refresh_hash, account.id)
+    
+    # Redirect to frontend with tokens
+    # Using fragment (#) to keep tokens out of server logs
+    redirect_url = (
+        f"{FRONTEND_URL}/auth/callback"
+        f"#access_token={token_pair.access_token}"
+        f"&refresh_token={token_pair.refresh_token}"
+        f"&expires_in={token_pair.expires_in}"
+    )
+    
+    return RedirectResponse(url=redirect_url, status_code=302)

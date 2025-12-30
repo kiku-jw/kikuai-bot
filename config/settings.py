@@ -33,6 +33,10 @@ BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 
 # Google OAuth
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+
+# Frontend URL (for OAuth redirects)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://kikuai.dev")
 
 # Credits System
 CREDITS_PER_USD = 1000  # 1000 credits = $1 USD
