@@ -1,12 +1,12 @@
 [project]
 name = "kikuai-bot"
 version = "0.1.0"
-description = "Telegram bot for managing and paying for KikuAI Lab API products"
+description = "Telegram bot for managing and paying for KikuAI API products"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0"}
 authors = [
-    {name = "KikuAI Lab"}
+    {name = "KikuAI"}
 ]
 
 [tool.ruff]

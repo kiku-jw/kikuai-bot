@@ -69,7 +69,7 @@ async def send_magic_link_email(to_email: str, magic_link: str) -> bool:
         <p>If you didn't request this login link, you can safely ignore this email.</p>
         <div class="footer">
             <p>This link can only be used once and expires in 15 minutes.</p>
-            <p>© 2025 KikuAI Lab. All rights reserved.</p>
+            <p>© 2025 KikuAI OÜ. All rights reserved.</p>
         </div>
     </div>
 </body>
@@ -85,7 +85,7 @@ This link will expire in 15 minutes.
 
 If you didn't request this login link, you can safely ignore this email.
 
-© 2025 KikuAI Lab
+© 2025 KikuAI OÜ
 """,
                 },
                 timeout=10.0,

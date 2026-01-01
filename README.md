@@ -1,6 +1,6 @@
 # KikuAI Bot
 
-Telegram bot for managing and paying for KikuAI Lab API products. 
+Telegram bot for managing and paying for KikuAI API products. 
 Built with AI-first principles, high security, and seamless user experience.
 
 ## Features
