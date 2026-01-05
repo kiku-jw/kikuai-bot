@@ -31,6 +31,7 @@ class PaymentMethod(str, Enum):
     PADDLE = "paddle"
     TELEGRAM_STARS = "telegram_stars"
     LEMONSQUEEZY = "lemonsqueezy"
+    CREEM = "creem"
 
 
 class PaymentStatus(str, Enum):

@@ -106,6 +106,18 @@ def get_payment_engine() -> PaymentEngine:
                 redis_client=redis_client,
             )
             _payment_engine.register_provider(PaymentMethod.TELEGRAM_STARS, stars_provider)
+        
+        # Register Creem provider
+        from config.settings import CREEM_ENABLED, CREEM_API_KEY, CREEM_PRODUCT_ID, CREEM_WEBHOOK_SECRET
+        if CREEM_ENABLED and CREEM_API_KEY:
+            from api.services.creem_provider import CreemProvider
+            creem_provider = CreemProvider(
+                api_key=CREEM_API_KEY,
+                product_id=CREEM_PRODUCT_ID,
+                webhook_secret=CREEM_WEBHOOK_SECRET,
+                balance_service=balance_manager,
+            )
+            _payment_engine.register_provider(PaymentMethod.CREEM, creem_provider)
     
     return _payment_engine
 

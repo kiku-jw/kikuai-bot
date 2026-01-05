@@ -221,3 +221,98 @@ async def handle_lemonsqueezy_webhook(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Processing error: {str(e)}"
             )
+
+
+@router.post("/creem")
+async def handle_creem_webhook(
+    request: Request,
+    x_signature: str = Header(None, alias="X-Signature"),
+    creem_signature: str = Header(None, alias="Creem-Signature"),
+):
+    """
+    Handle Creem webhook events.
+    
+    Creem sends webhooks for checkout.completed, payment.successful, etc.
+    Returns 200 to acknowledge receipt.
+    """
+    import logging
+    import time
+    
+    logger = logging.getLogger(__name__)
+    
+    if not _payment_engine:
+        logger.error("Creem webhook received but payment engine not initialized")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Payment service not initialized"
+        )
+    
+    start_time = time.time()
+    body = await request.body()
+    
+    # Parse webhook event
+    try:
+        event_data = await request.json()
+    except Exception as e:
+        logger.error(f"Invalid JSON in Creem webhook: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload"
+        )
+    
+    # Extract event info
+    event_type = event_data.get("type", event_data.get("event_type", "checkout.completed"))
+    event_id = event_data.get("id", "unknown")
+    
+    # Get signature (try both header names)
+    signature = x_signature or creem_signature or ""
+    
+    logger.info(f"Creem webhook received: type={event_type}, id={event_id}")
+    
+    # Create webhook event
+    webhook_event = WebhookEvent(
+        event_type=event_type,
+        event_id=event_id,
+        data=event_data.get("data", event_data),
+        raw_body=body,
+        signature=signature,
+    )
+    
+    # Process through payment engine
+    try:
+        transaction = await _payment_engine.process_webhook(
+            PaymentMethod.CREEM,
+            webhook_event
+        )
+        
+        duration_ms = (time.time() - start_time) * 1000
+        
+        if transaction:
+            logger.info(
+                f"Creem webhook processed: event={event_id}, "
+                f"transaction={transaction.id}, duration={duration_ms:.0f}ms"
+            )
+            return {
+                "status": "processed",
+                "transaction_id": transaction.id,
+            }
+        else:
+            logger.info(f"Creem webhook ignored: event={event_id}, duration={duration_ms:.0f}ms")
+            return {
+                "status": "ignored",
+                "message": "Event already processed or not applicable"
+            }
+    
+    except InvalidSignatureError as e:
+        logger.warning(f"Creem webhook invalid signature: event={event_id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid signature"
+        )
+    
+    except Exception as e:
+        logger.error(f"Creem webhook processing error: event={event_id}, error={e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Processing error: {str(e)}"
+        )

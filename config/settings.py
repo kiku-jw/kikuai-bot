@@ -49,6 +49,12 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "https://kikuai.dev")
 CREDITS_PER_USD = 1000  # 1000 credits = $1 USD
 CREDITS_DISPLAY_NAME = "credits"
 
+# Creem (alternative billing provider)
+CREEM_ENABLED = os.getenv("BILLING_CREEM_ENABLED", "false").lower() == "true"
+CREEM_API_KEY = os.getenv("CREEM_API_KEY")
+CREEM_PRODUCT_ID = os.getenv("CREEM_PRODUCT_ID")
+CREEM_WEBHOOK_SECRET = os.getenv("CREEM_WEBHOOK_SECRET")
+
 # Free Tier Settings
 FREE_TIER_REQUIRES_EMAIL_VERIFICATION = True
 FREE_TIER_PROGRESSIVE_DAYS = 7  # First week = 50% limits
